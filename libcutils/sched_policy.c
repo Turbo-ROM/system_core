@@ -55,12 +55,14 @@ static inline SchedPolicy _policy(SchedPolicy p)
 static pthread_once_t the_once = PTHREAD_ONCE_INIT;
 
 static int __sys_supports_schedgroups = -1;
+static int __sys_supports_cpusets = -1;
 
 // File descriptors open to /dev/cpuctl/../tasks, setup by initialize, or -1 on error.
 static int bg_cgroup_fd = -1;
 static int fg_cgroup_fd = -1;
 
 // File descriptors open to /dev/cpuset/../tasks, setup by initialize, or -1 on error
+static int system_bg_cpuset_fd = -1;
 static int bg_cpuset_fd = -1;
 static int fg_cpuset_fd = -1;
 
@@ -108,12 +110,22 @@ static void __initialize(void) {
         fg_cgroup_fd = open(filename, O_WRONLY | O_CLOEXEC);
         if (fg_cgroup_fd < 0) {
             SLOGE("open of %s failed: %s\n", filename, strerror(errno));
+            __sys_supports_schedgroups = 0;
         }
 
         filename = "/dev/cpuctl/bg_non_interactive/tasks";
         bg_cgroup_fd = open(filename, O_WRONLY | O_CLOEXEC);
         if (bg_cgroup_fd < 0) {
             SLOGE("open of %s failed: %s\n", filename, strerror(errno));
+            __sys_supports_schedgroups = 0;
+        }
+
+        if (!__sys_supports_schedgroups) {
+            close(bg_cgroup_fd);
+            bg_cgroup_fd = -1;
+
+            close(fg_cgroup_fd);
+            fg_cgroup_fd = -1;
         }
     } else {
         __sys_supports_schedgroups = 0;
@@ -121,11 +133,41 @@ static void __initialize(void) {
 
 #ifdef USE_CPUSETS
     if (!access("/dev/cpuset/tasks", F_OK)) {
+        __sys_supports_cpusets = 1;
 
         filename = "/dev/cpuset/foreground/tasks";
         fg_cpuset_fd = open(filename, O_WRONLY | O_CLOEXEC);
+        if (fg_cpuset_fd < 0) {
+            SLOGE("open of %s failed %s\n", filename, strerror(errno));
+            __sys_supports_cpusets = 0;
+        }
+
         filename = "/dev/cpuset/background/tasks";
         bg_cpuset_fd = open(filename, O_WRONLY | O_CLOEXEC);
+        if (bg_cpuset_fd < 0) {
+            SLOGE("open of %s failed %s\n", filename, strerror(errno));
+            __sys_supports_cpusets = 0;
+        }
+
+        filename = "/dev/cpuset/system-background/tasks";
+        system_bg_cpuset_fd = open(filename, O_WRONLY | O_CLOEXEC);
+        if (system_bg_cpuset_fd < 0) {
+            SLOGE("open of %s failed %s\n", filename, strerror(errno));
+            __sys_supports_cpusets = 0;
+        }
+
+        if (!__sys_supports_cpusets) {
+            close(fg_cpuset_fd);
+            fg_cpuset_fd = -1;
+
+            close(bg_cpuset_fd);
+            bg_cpuset_fd = -1;
+
+            close(system_bg_cpuset_fd);
+            system_bg_cpuset_fd = -1;
+        }
+    } else {
+        __sys_supports_cpusets = 0;
     }
 #endif
 
@@ -247,8 +289,13 @@ int set_cpuset_policy(int tid, SchedPolicy policy)
     if (tid == 0) {
         tid = gettid();
     }
-    policy = _policy(policy);
+
     pthread_once(&the_once, __initialize);
+
+    if (!__sys_supports_cpusets)
+        return set_sched_policy(tid, policy);
+
+    policy = _policy(policy);
 
     int fd;
     switch (policy) {
@@ -259,6 +306,9 @@ int set_cpuset_policy(int tid, SchedPolicy policy)
     case SP_AUDIO_APP:
     case SP_AUDIO_SYS:
         fd = fg_cpuset_fd;
+        break;
+    case SP_SYSTEM:
+        fd = system_bg_cpuset_fd;
         break;
     default:
         fd = -1;
